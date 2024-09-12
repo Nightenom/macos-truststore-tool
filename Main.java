@@ -57,7 +57,7 @@ public class Main {
         while (phase != Phase.EXIT) {
 
             System.out.println();
-            System.out.println("Current phase %s, you can switch to %s".formatted(phase, phase.otherValues()));
+            System.out.println("Current mode %s, you can switch to %s".formatted(phase, phase.otherValues()));
             System.out.println(phase + " actions: ");
             phase.actions.keySet().forEach(
                     act -> System.out.println("\t[" + act.shortKey() + ", " + act.key() + "] - " + act.desc()));
@@ -98,7 +98,9 @@ public class Main {
         OUTPUT(Map.of("java_home_cacerts - JAVA_HOME/lib/security/cacerts", Main::writeJavaHomeCacerts,
                 "java_tool_options_permanent - set env var JAVA_TOOL_OPTIONS for all apps in "
                         + MACOS_PERMANENT_ENV_PATH,
-                Main::writeMacosPermanentEnvVar)),
+                Main::writeMacosPermanentEnvVar,
+                "unset_java_tool_options_permanent - undo java_tool_options_permanent",
+                Main::disableMacosPermanentEnvVar)),
         EXIT(Map.of());
 
         private final Map<ActionKey, Action> actions = new TreeMap<>();
@@ -208,13 +210,13 @@ public class Main {
             cacertsStore.store(os, DEFAULT_PASSWORD);
         }
 
+        final String[] setEnvCommand = {
+                "launchctl", "setenv", "JAVA_TOOL_OPTIONS",
+                "-Djavax.net.ssl.trustStore=$$CACERTS_PATH$$ -Djavax.net.ssl.trustStorePassword=changeit"
+                        .replace("$$CACERTS_PATH$$", cacertsPath.toString()) };
+
         if (!Files.exists(MACOS_PERMANENT_ENV_PATH)) {
             System.out.println("After first installation you might need to restart the application (or even OS)");
-
-            final String[] setEnvCommand = {
-                    "launchctl", "setenv", "JAVA_TOOL_OPTIONS",
-                    "-Djavax.net.ssl.trustStore=$$CACERTS_PATH$$ -Djavax.net.ssl.trustStorePassword=changeit"
-                            .replace("$$CACERTS_PATH$$", cacertsPath.toString()) };
 
             final String pList = """
                     <?xml version="1.0" encoding="UTF-8"?>
@@ -242,10 +244,19 @@ public class Main {
             Files.writeString(MACOS_PERMANENT_ENV_PATH, pList, StandardOpenOption.TRUNCATE_EXISTING,
                     StandardOpenOption.CREATE, StandardOpenOption.WRITE);
 
-            System.out.println("Running command for almost immediate effect: " + Arrays.toString(setEnvCommand));
-            new ProcessBuilder(setEnvCommand).start().waitFor();
         }
 
+        System.out.println("Running command for almost immediate effect: " + Arrays.toString(setEnvCommand));
+        new ProcessBuilder(setEnvCommand).start().waitFor();
+    }
+
+    private static void disableMacosPermanentEnvVar(final Console cli) throws Exception {
+        Files.deleteIfExists(MACOS_PERMANENT_ENV_PATH);
+
+        final String[] unsetEnvCommand = { "launchctl", "unsetenv", "JAVA_TOOL_OPTIONS" };
+
+        System.out.println("Running command for almost immediate effect: " + Arrays.toString(unsetEnvCommand));
+        new ProcessBuilder(unsetEnvCommand).start().waitFor();
     }
 
     private static void readCerFile(final Console cli) throws Exception {
