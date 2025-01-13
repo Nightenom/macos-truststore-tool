@@ -66,16 +66,49 @@ public class Main
 
         Phase phase = Phase.INPUT;
 
+        final boolean processArgsAndExit = args.length == 1;
+        final String argsToProcess = args[0];
+        int argsCursor = 0;
+
         while (phase != Phase.EXIT)
         {
             System.out.println();
             System.out.println("Current mode %s, you can switch to %s".formatted(phase, phase.otherValues()));
-            System.out.println(phase + " actions: ");
-            phase.actions.keySet().forEach(act -> System.out.println("\t[" + act.shortKey() + ", " + act.key() + "] - " + act.desc()));
+            if (!processArgsAndExit)
+            {
+                System.out.println(phase + " actions: ");
+                phase.actions.keySet()
+                    .forEach(act -> System.out.println("\t[" + act.shortKey() + ", " + act.key() + "] - " + act.desc()));
+            }
             System.out.println("Current cert count: " + certificates.size());
             System.out.print("Input: ");
 
-            final String line = cli.readLine().trim();
+            final String line;
+            String lineArgs = null;
+            if (processArgsAndExit)
+            {
+                final int nextCursor = argsToProcess.indexOf(',', argsCursor);
+
+                if (argsCursor == argsToProcess.length())
+                {
+                    line = Phase.EXIT.name().toLowerCase(Locale.ROOT);
+                }
+                else
+                {
+                    final String arg = argsToProcess.substring(argsCursor, nextCursor == -1 ? argsToProcess.length() : nextCursor);
+                    final int argDelim = arg.indexOf(':');
+
+                    line = argDelim == -1 ? arg : arg.substring(0, argDelim);
+                    lineArgs = argDelim == -1 ? null : arg.substring(argDelim + 1);
+
+                    argsCursor = nextCursor == -1 ? argsToProcess.length() : nextCursor + 1;
+                }
+                System.out.println(line);
+            }
+            else
+            {
+                line = cli.readLine().trim();
+            }
 
             System.out.println();
 
@@ -113,7 +146,11 @@ public class Main
             "apple_keychain - Apple 'KeychainStore' without 'System Roots'",
             Main::readAppleKeychain,
             "cer_file - .cer/.crt file (can parse multiple certificates in one file)",
-            Main::readCerFile)),
+            Main::readCerFile,
+            "apple_security_system - certs in /Library/Keychains/System.keychain",
+            Action2.unwrap(Main::readAppleSecurity, Path.of("/Library", "Keychains", "System.keychain")),
+            "apple_security_system_root_certs - certs in /System/Library/Keychains/SystemRootCertificates.keychain",
+            Action2.unwrap(Main::readAppleSecurity, Path.of("/System", "Library", "Keychains", "SystemRootCertificates.keychain")))),
         OUTPUT(Map.of("java_home_cacerts - JAVA_HOME/lib/security/cacerts",
             Main::writeJavaHomeCacerts,
             "java_tool_options_permanent - set env var JAVA_TOOL_OPTIONS for all apps in " + MACOS_PERMANENT_ENV_PATH,
@@ -156,6 +193,22 @@ public class Main
         private static interface Action
         {
             void run(Console cli) throws Exception;
+        }
+
+        @FunctionalInterface
+        private static interface Action2<T>
+        {
+            void run(Console cli, T arg) throws Exception;
+
+            default Action unwrap(T arg)
+            {
+                return cli -> run(cli, arg);
+            }
+
+            static <U> Action unwrap(Action2<U> action, U arg)
+            {
+                return action.unwrap(arg);
+            }
         }
     }
 
@@ -223,6 +276,26 @@ public class Main
         }
     }
 
+    private static void readAppleSecurity(final Console cli, Path path) throws Exception
+    {
+        path = path.toAbsolutePath().normalize();
+        final Process process = new ProcessBuilder("security", "find-certificate", "-a", "-p", path.toString()).start();
+
+        try (var is = process.getInputStream())
+        {
+            for (final Certificate cert : CertificateFactory.getInstance("X.509").generateCertificates(is))
+            {
+                certificates.add(cert);
+            }
+        }
+
+        if (process.exitValue() != 0)
+        {
+            throw new RuntimeException("Unable to read Apple security certs, exit code: %d, path: %s, stderr: "
+                .formatted(process.exitValue(), path.toString()) + new String(process.getErrorStream().readAllBytes()));
+        }
+    }
+
     private static void writeMacosPermanentEnvVar(final Console cli) throws Exception
     {
         final KeyStore cacertsStore = KeyStore.getInstance(KeyStore.getDefaultType());
@@ -233,12 +306,21 @@ public class Main
         {
             final String alias = cert instanceof final X509Certificate x509Cert ? x509Cert.getSubjectX500Principal().getName() :
                 "unnamed" + unnamedCerts++;
-            cacertsStore.setCertificateEntry(alias, cert);
+            if (cacertsStore.containsAlias(alias))
+            {
+                System.out.println("Duplicated cert name for: " + alias);
+                cacertsStore.setCertificateEntry(alias + " " + cacertsStore.size(), cert);
+            }
+            else
+            {
+                cacertsStore.setCertificateEntry(alias, cert);
+            }
         }
 
         if (cacertsStore.size() != certificates.size())
         {
-            throw new RuntimeException("Cannot create keystore - count differ");
+            throw new RuntimeException(
+                "Cannot create keystore - count differ, want: %d, wrote: %d".formatted(certificates.size(), cacertsStore.size()));
         }
 
         final Path cacertsPath =
