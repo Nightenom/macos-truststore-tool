@@ -67,7 +67,7 @@ public class Main
         Phase phase = Phase.INPUT;
 
         final boolean processArgsAndExit = args.length == 1;
-        final String argsToProcess = args[0];
+        final String argsToProcess = processArgsAndExit ? args[0] : null;
         int argsCursor = 0;
 
         while (phase != Phase.EXIT)
